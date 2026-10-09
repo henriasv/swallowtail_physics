@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swallowtail_physics"
+dynamic = ["version"]
+description = "Vectorized NumPy search for the swallowtail self-intersection (phase-equilibrium point) in G(P) data."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22"]
+keywords = ["thermodynamics", "phase equilibrium", "swallowtail", "Maxwell construction", "van der Waals"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Repository = "https://github.com/henriasv/swallowtail_physics"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.dynamic]
+version = { attr = "swallowtail_physics.__version__" }
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+# Any NumPy RuntimeWarning (e.g. divide-by-zero on parallel segments) fails the suite.
+filterwarnings = ["error"]
