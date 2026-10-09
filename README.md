@@ -46,6 +46,32 @@ print(f"P_eq = {P_eq:.4f}, G_eq = {G_eq:.4f}")  # P_eq = 0.6470, G_eq = -4.0763
 returns `(P_eq, G_eq)` as floats, or `(None, None)` if the curve does not
 cross itself (for example above the critical temperature).
 
+### Volume change across the transition
+
+Pass the volume array as well to get the volume of each coexisting phase:
+
+```python
+from swallowtail_physics import find_coexistence
+
+result = find_coexistence(P, G, v)
+print(f"V1 = {result.V1:.4f}, V2 = {result.V2:.4f}, dV = {result.dV:.4f}")
+# V1 = 0.6034, V2 = 2.3488, dV = 1.7454
+```
+
+`find_coexistence(P, G, V)` finds the crossing in G(P) exactly like
+`find_equilibrium` and returns a named tuple `(P, G, V1, V2)` with
+`dV = V2 - V1`, or `None` if there is no crossing. The crossing point lies on
+one segment of each stable branch, and `V` is interpolated at that point on
+both segments. `V1` belongs to the branch reached first along the data, so `dV`
+is positive when the data are ordered by increasing volume.
+
+Since (∂G/∂P)_T = V, `dV` is the jump in slope of G(P) at the transition.
+Interpolating V is second-order accurate in the point spacing. Estimating `dV`
+from the segment slopes instead is only first-order: at 2000 points it is about
+1000 times less accurate for the van der Waals fluid. With `dV` at several
+temperatures, the Clausius–Clapeyron relation gives the latent heat,
+`L = T · dV · dP_eq/dT`.
+
 ## How it works
 
 The data are treated as a polyline of segments `p_i + t r_i`, `t ∈ [0, 1]`.
@@ -86,8 +112,9 @@ pytest
 ```
 
 The suite covers exact crossings on programmatically generated swallowtails,
-convergence to an analytic crossing, agreement with an independent Maxwell
-construction for the van der Waals fluid, inputs without a crossing, flat and
+convergence to an analytic crossing, coexistence pressure and phase volumes
+checked against an independent Maxwell construction for the van der Waals
+fluid, inputs without a crossing, flat and
 parallel segments, and input validation. NumPy warnings are treated as errors.
 
 ## License

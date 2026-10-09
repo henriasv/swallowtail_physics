@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from swallowtail_physics import find_equilibrium, intersect
+from swallowtail_physics import Coexistence, find_coexistence, find_equilibrium, intersect
 
 
 # --------------------------------------------------------------------------- #
@@ -51,8 +51,8 @@ def maxwell_coexistence(T, P_lo, P_hi):
         else:
             P_hi = P_mid
     P_eq = 0.5 * (P_lo + P_hi)
-    v_l, _ = branch_volumes(P_eq)
-    return P_eq, vdw_isotherm(T, v_l)[1]
+    v_l, v_g = branch_volumes(P_eq)
+    return P_eq, vdw_isotherm(T, v_l)[1], v_l, v_g
 
 
 # Minimal hand-built swallowtail: branch G = P from (0, 0), cusp at (5, 5.5),
@@ -116,7 +116,7 @@ def test_van_der_waals_isotherm_matches_maxwell_construction():
     T = 0.9
     v = np.geomspace(0.45, 10.0, 5000)
     P, G = vdw_isotherm(T, v)
-    P_ref, G_ref = maxwell_coexistence(T, P_lo=0.5, P_hi=0.7)
+    P_ref, G_ref, _, _ = maxwell_coexistence(T, P_lo=0.5, P_hi=0.7)
     assert P_ref == pytest.approx(0.6470, abs=1e-4)  # tabulated vdW value
 
     P_eq, G_eq = find_equilibrium(P, G)
@@ -141,13 +141,78 @@ def test_first_crossing_along_the_curve_is_returned():
 
 @pytest.mark.parametrize("max_pairs", [1, 1000, 1 << 16])  # one row per block, ..., default
 def test_blocked_evaluation_matches_single_block(monkeypatch, max_pairs):
-    P, G, _ = polynomial_swallowtail(n_half=301)
+    P, G, s = polynomial_swallowtail(n_half=301)
     monkeypatch.setattr(intersect, "_MAX_PAIRS_PER_BLOCK", 1 << 30)
-    single_block = find_equilibrium(P, G)
+    single_block = (find_equilibrium(P, G), find_coexistence(P, G, s))
 
     monkeypatch.setattr(intersect, "_MAX_PAIRS_PER_BLOCK", max_pairs)
 
-    assert find_equilibrium(P, G) == single_block
+    assert (find_equilibrium(P, G), find_coexistence(P, G, s)) == single_block
+
+
+# --------------------------------------------------------------------------- #
+# Coexistence volumes
+# --------------------------------------------------------------------------- #
+
+def test_van_der_waals_volumes_match_maxwell_construction():
+    T = 0.9
+    v = np.geomspace(0.45, 10.0, 5000)
+    P, G = vdw_isotherm(T, v)
+    P_ref, G_ref, v_liquid, v_gas = maxwell_coexistence(T, P_lo=0.5, P_hi=0.7)
+
+    result = find_coexistence(P, G, v)
+
+    assert result.P == pytest.approx(P_ref, rel=1e-6)
+    assert result.G == pytest.approx(G_ref, rel=1e-6)
+    assert result.V1 == pytest.approx(v_liquid, rel=1e-6)
+    assert result.V2 == pytest.approx(v_gas, rel=1e-6)
+    assert result.dV == pytest.approx(v_gas - v_liquid, rel=1e-6)
+
+
+def test_hand_built_loop_gives_exact_volumes():
+    # The crossing is at t = 1/2 on segment 0 and at u = 3/7 on segment 3.
+    result = find_coexistence(LOOP_P, LOOP_G, np.arange(5.0))
+    assert result == pytest.approx((2.0, 2.0, 0.5, 3 + 3 / 7), rel=1e-12)
+    assert result.dV == pytest.approx(41 / 14, rel=1e-12)
+
+
+def test_coexistence_agrees_with_find_equilibrium():
+    P, G, s = polynomial_swallowtail()
+
+    result = find_coexistence(P, G, s)
+
+    assert isinstance(result, Coexistence)
+    assert (result.P, result.G) == find_equilibrium(P, G)
+    # With s as the volume, the exact crossing is at s = -sqrt(3) and +sqrt(3);
+    # the second-order interpolation error is ~1e-6 at this resolution.
+    assert result.V1 == pytest.approx(-result.V2, rel=1e-12)
+    assert result.dV == pytest.approx(2 * np.sqrt(3), rel=1e-5)
+
+
+def test_reversed_traversal_swaps_volumes():
+    V = np.arange(5.0)
+    forward = find_coexistence(LOOP_P, LOOP_G, V)
+    backward = find_coexistence(LOOP_P[::-1], LOOP_G[::-1], V[::-1])
+    assert (backward.V1, backward.V2) == pytest.approx((forward.V2, forward.V1), rel=1e-12)
+    assert backward.dV == pytest.approx(-forward.dV, rel=1e-12)
+
+
+def test_coexistence_without_crossing_returns_none():
+    v = np.geomspace(0.45, 10.0, 2000)
+    P, G = vdw_isotherm(T=1.1, v=v)
+    assert find_coexistence(P, G, v) is None
+
+
+def test_coexistence_volume_length_mismatch_raises():
+    with pytest.raises(ValueError, match="same length"):
+        find_coexistence(LOOP_P, LOOP_G, np.arange(4.0))
+
+
+def test_coexistence_non_finite_volume_raises():
+    V = np.arange(5.0)
+    V[0] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        find_coexistence(LOOP_P, LOOP_G, V)
 
 
 # --------------------------------------------------------------------------- #

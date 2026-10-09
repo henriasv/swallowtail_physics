@@ -23,12 +23,12 @@ evaluated at once by broadcasting over an (i, j) grid.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple, Union
+from typing import NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
 
-__all__ = ["find_equilibrium"]
+__all__ = ["Coexistence", "find_coexistence", "find_equilibrium"]
 
 # Segment pairs with |r_i x r_j| <= _PARALLEL_RTOL * |r_i| |r_j|, i.e. with
 # |sin(angle)| below this, are treated as parallel and skipped. Zero-length
@@ -40,6 +40,24 @@ _PARALLEL_RTOL = 1e-12
 # fast as one large N**2 broadcast, bounds memory for any N, and lets the search
 # stop at the first block that contains a crossing.
 _MAX_PAIRS_PER_BLOCK = 1 << 16
+
+
+class Coexistence(NamedTuple):
+    """Phase-coexistence point found at a swallowtail crossing.
+
+    ``V1`` is the volume on the branch reached first along the data and ``V2``
+    the volume on the branch reached second.
+    """
+
+    P: float
+    G: float
+    V1: float
+    V2: float
+
+    @property
+    def dV(self) -> float:
+        """Volume change ``V2 - V1`` across the transition."""
+        return self.V2 - self.V1
 
 
 def find_equilibrium(
@@ -76,35 +94,91 @@ def find_equilibrium(
 
     The search is O(N**2) in time over all segment pairs and fully vectorized;
     memory is bounded by evaluating the pair grid in row blocks.
-    """
-    P, G = _as_curve(P, G)
-    if P.size < 4:  # need at least two non-adjacent segments
-        return None, None
 
-    crossing = _first_crossing(_rescale(P), _rescale(G))
+    See Also
+    --------
+    find_coexistence : Also returns the volumes of both phases.
+    """
+    P, G = _as_curve(P, G, names="P and G")
+    crossing = _crossing(P, G)
     if crossing is None:
         return None, None
 
-    i, t = crossing
-    P_eq = P[i] + t * (P[i + 1] - P[i])
-    G_eq = G[i] + t * (G[i + 1] - G[i])
-    return float(P_eq), float(G_eq)
+    i, t, _, _ = crossing
+    return float(_lerp(P, i, t)), float(_lerp(G, i, t))
 
 
-def _as_curve(P: ArrayLike, G: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
-    P = np.asarray(P, dtype=float)
-    G = np.asarray(G, dtype=float)
-    if P.ndim != 1 or G.ndim != 1:
-        raise ValueError(
-            f"P and G must be 1D arrays, got shapes {P.shape} and {G.shape}."
-        )
-    if P.shape != G.shape:
-        raise ValueError(
-            f"P and G must have the same length, got {P.size} and {G.size}."
-        )
-    if not (np.isfinite(P).all() and np.isfinite(G).all()):
-        raise ValueError("P and G must contain only finite values.")
-    return P, G
+def find_coexistence(P: ArrayLike, G: ArrayLike, V: ArrayLike) -> Optional[Coexistence]:
+    """Find the coexistence point and the volume of each phase.
+
+    The crossing is located in G(P) exactly as in :func:`find_equilibrium`.
+    The crossing point lies on one segment of each stable branch, and ``V`` is
+    interpolated at that point on both segments, giving the volumes of the two
+    coexisting phases.
+
+    Parameters
+    ----------
+    P, G : array_like, shape (N,)
+        Pressure and Gibbs free energy, ordered along the curve.
+    V : array_like, shape (N,)
+        Volume (e.g. molar volume) at each data point, in any units.
+
+    Returns
+    -------
+    Coexistence or None
+        Named tuple ``(P, G, V1, V2)`` with the volume change available as
+        ``.dV = V2 - V1``. ``V1`` belongs to the branch reached first along the
+        data, so ``dV`` is positive when the data are ordered by increasing
+        volume. ``None`` if the curve does not cross itself.
+
+    Raises
+    ------
+    ValueError
+        If ``P``, ``G`` and ``V`` are not 1D, differ in length, or contain
+        non-finite values.
+
+    Notes
+    -----
+    Because (dG/dP)_T = V, ``dV`` is the jump in slope of the stable G(P)
+    envelope at the transition. Interpolating ``V`` is second-order accurate
+    in the point spacing, whereas differencing segment slopes is first-order.
+    """
+    P, G, V = _as_curve(P, G, V, names="P, G and V")
+    crossing = _crossing(P, G)
+    if crossing is None:
+        return None
+
+    i, t, j, u = crossing
+    return Coexistence(
+        P=float(_lerp(P, i, t)),
+        G=float(_lerp(G, i, t)),
+        V1=float(_lerp(V, i, t)),
+        V2=float(_lerp(V, j, u)),
+    )
+
+
+def _as_curve(*arrays: ArrayLike, names: str) -> Tuple[np.ndarray, ...]:
+    out = tuple(np.asarray(a, dtype=float) for a in arrays)
+    if any(a.ndim != 1 for a in out):
+        shapes = ", ".join(str(a.shape) for a in out)
+        raise ValueError(f"{names} must be 1D arrays, got shapes {shapes}.")
+    if len({a.shape for a in out}) > 1:
+        sizes = ", ".join(str(a.size) for a in out)
+        raise ValueError(f"{names} must have the same length, got {sizes}.")
+    if not all(np.isfinite(a).all() for a in out):
+        raise ValueError(f"{names} must contain only finite values.")
+    return out
+
+
+def _lerp(x: np.ndarray, k: int, s: float) -> float:
+    """Value of ``x`` at fraction ``s`` along segment ``k``."""
+    return x[k] + s * (x[k + 1] - x[k])
+
+
+def _crossing(P: np.ndarray, G: np.ndarray) -> Optional[Tuple[int, float, int, float]]:
+    if P.size < 4:  # need at least two non-adjacent segments
+        return None
+    return _first_crossing(_rescale(P), _rescale(G))
 
 
 def _rescale(x: np.ndarray) -> np.ndarray:
@@ -125,11 +199,13 @@ def _cross(ax: np.ndarray, ay: np.ndarray, bx: np.ndarray, by: np.ndarray) -> np
     return ax * by - ay * bx
 
 
-def _first_crossing(x: np.ndarray, y: np.ndarray) -> Optional[Tuple[int, float]]:
-    """Return ``(i, t)`` of the first crossing along the polyline, or None.
+def _first_crossing(
+    x: np.ndarray, y: np.ndarray
+) -> Optional[Tuple[int, float, int, float]]:
+    """Return ``(i, t, j, u)`` of the first crossing along the polyline, or None.
 
-    The crossing lies at ``t`` along segment ``i``, where ``i`` is the earlier
-    of the two crossing segments.
+    The crossing lies at ``t`` along segment ``i`` and at ``u`` along segment
+    ``j``, where ``i < j``.
     """
     px, py = x[:-1], y[:-1]  # segment start points p, shape (M,)
     rx, ry = np.diff(x), np.diff(y)  # segment vectors r, shape (M,)
@@ -181,6 +257,8 @@ def _first_crossing(x: np.ndarray, y: np.ndarray) -> Optional[Tuple[int, float]]
             # Blocks run in order of i, so the earliest point along the curve
             # (smallest i + t) in the first block with a hit is the global one.
             k = np.argmin(bi + t)
-            return a + int(bi[k]), float(t[k])
+            bi, bj = bi[k], bj[k]
+            u = u_num[bi, bj] / denom[bi, bj]
+            return a + int(bi), float(t[k]), a + 2 + int(bj), float(u)
 
     return None
